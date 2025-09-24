@@ -715,16 +715,16 @@ def main(md_file):
     base = os.path.splitext(os.path.basename(md_file))[0]
     fm = parse_frontmatter(md_file)
 
-    if fm.get("public") == "false":
+    if fm.get("private") == True:
         print(f"公開禁止ファイルのため、処理を終了します。")
-        print(f"  public: false -> 公開不可")
+        print(f"  private: true -> 公開不可")
         return
 
-    if fm.get("public") == None:
+    if fm.get("private") == None:
         print(f"公開可否が設定されていないため、処理を終了します。")
-        print(f"front-matterに 「public」 を設定してください。")
-        print(f"  public: true  -> 公開可能")
-        print(f"  public: false -> 公開不可")
+        print(f"front-matterに 「private」 を設定してください。")
+        print(f"  private: false -> 公開可能")
+        print(f"  private: true  -> 公開不可")
         return
 
     wp_id = fm.get("wp_id")
