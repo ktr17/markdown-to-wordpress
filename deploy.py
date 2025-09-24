@@ -714,6 +714,9 @@ def main(md_file):
 
     base = os.path.splitext(os.path.basename(md_file))[0]
     fm = parse_frontmatter(md_file)
+    if fm.get("public") == "false":
+        print(f"公開禁止ファイルのため、処理を終了します。")
+        return
 
     wp_id = fm.get("wp_id")
     # フロントマターのtitleを優先、なければファイル名ベースを使用
