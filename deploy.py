@@ -715,6 +715,18 @@ def main(md_file):
     base = os.path.splitext(os.path.basename(md_file))[0]
     fm = parse_frontmatter(md_file)
 
+    if fm.get("public") == "false":
+        print(f"公開禁止ファイルのため、処理を終了します。")
+        print(f"  public: false -> 公開不可")
+        return
+
+    if fm.get("public") == None:
+        print(f"公開可否が設定されていないため、処理を終了します。")
+        print(f"front-matterに 「public」 を設定してください。")
+        print(f"  public: true  -> 公開可能")
+        print(f"  public: false -> 公開不可")
+        return
+
     wp_id = fm.get("wp_id")
     # フロントマターのtitleを優先、なければファイル名ベースを使用
     title = fm.get("title", base)
