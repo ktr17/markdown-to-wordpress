@@ -631,57 +631,57 @@ def process_images_with_local_rename(config, md_file, slug):
 
     return wp_text
 
-def process_thumbnail_with_hash_tracking(config, md_file, slug, thumbnail_path):
-    """サムネイル画像をハッシュベースで処理（Obsidian対応）+ ローカルリネーム"""
-    if not thumbnail_path or thumbnail_path.startswith('http'):
-        print(f"サムネイル: 指定なしまたはURL形式のためスキップ: {thumbnail_path}")
+def process_featured_image_with_hash_tracking(config, md_file, slug, featured_image_path):
+    """アイキャッチ画像をハッシュベースで処理（Obsidian対応）+ ローカルリネーム"""
+    if not featured_image_path or featured_image_path.startswith('http'):
+        print(f"アイキャッチ画像: 指定なしまたはURL形式のためスキップ: {featured_image_path}")
         return "", ""
 
-    print(f"サムネイル処理開始: {thumbnail_path}")
+    print(f"アイキャッチ画像処理開始: {featured_image_path}")
 
     fm = parse_frontmatter(md_file)
     image_map = fm.get('wp_images', {})
 
-    decoded_path = unquote(thumbnail_path)
+    decoded_path = unquote(featured_image_path)
     abs_thumb = resolve_image_path(md_file, decoded_path)
     if not abs_thumb:
-        print(f"❌ サムネイル画像が見つかりません: {thumbnail_path}")
+        print(f"❌ アイキャッチ画像画像が見つかりません: {featured_image_path}")
         return "", ""
 
     safe_slug = sanitize_filename(slug)
     ext = os.path.splitext(abs_thumb)[1]
-    new_filename = f"{safe_slug}-thumbnail{ext}"
+    new_filename = f"{safe_slug}-featured-image{ext}"
     new_abs_thumb = rename_local_image(abs_thumb, new_filename)
 
     md_dir = os.path.dirname(os.path.abspath(md_file))
     vault_root = find_obsidian_vault_root(md_file)
     if vault_root and new_abs_thumb.startswith(vault_root):
-        new_thumbnail_path = os.path.relpath(new_abs_thumb, vault_root)
+        new_featured_image_path = os.path.relpath(new_abs_thumb, vault_root)
     else:
-        new_thumbnail_path = os.path.relpath(new_abs_thumb, md_dir)
+        new_featured_image_path = os.path.relpath(new_abs_thumb, md_dir)
 
-    print(f"   ローカルサムネイルリネーム: {thumbnail_path} -> {new_thumbnail_path}")
+    print(f"   ローカルアイキャッチ画像リネーム: {featured_image_path} -> {new_featured_image_path}")
 
     # リネーム後のファイルでハッシュ計算
     file_hash = get_file_hash(new_abs_thumb)
     print(f"   ハッシュ値: {file_hash}")
 
     if file_hash in image_map and 'id' in image_map[file_hash]:
-        # 既存サムネイル使用
-        thumb_id = image_map[file_hash]['id']
-        print(f"✅ 既存サムネイル使用: ID {thumb_id}")
+        # 既存アイキャッチ画像使用
+        featured_image_id = image_map[file_hash]['id']
+        print(f"✅ 既存アイキャッチ画像使用: ID {featured_image_id}")
         # original_path を最新に更新
-        image_map[file_hash]['original_path'] = new_thumbnail_path
+        image_map[file_hash]['original_path'] = new_featured_image_path
     else:
         # 新規アップロード
-        print(f"📤 新規サムネイルアップロード開始...")
-        thumb_id, wp_url = upload_new_image(config, new_abs_thumb, safe_slug, file_hash)
+        print(f"📤 新規アイキャッチ画像アップロード開始...")
+        featured_image_id, wp_url = upload_new_image(config, new_abs_thumb, safe_slug, file_hash)
         image_map[file_hash] = {
-            'id': thumb_id,
+            'id': featured_image_id,
             'url': wp_url,
-            'original_path': new_thumbnail_path
+            'original_path': new_featured_image_path
         }
-        print(f"✅ 新規サムネイルアップロード完了: ID {thumb_id}")
+        print(f"✅ 新規アイキャッチ画像アップロード完了: ID {featured_image_id}")
         print(f"   WordPress URL: {wp_url}")
 
     # フロントマターに必ず反映
@@ -689,7 +689,7 @@ def process_thumbnail_with_hash_tracking(config, md_file, slug, thumbnail_path):
 
     write_frontmatter(md_file, fm)
 
-    return thumb_id, new_thumbnail_path
+    return featured_image_id, new_featured_image_path
 
 def assign_images_to_post(config, wp_id, image_map):
     """既存の画像を投稿に割り当て"""
@@ -739,37 +739,37 @@ def main(md_file):
         categories = categories_raw
     else:
         categories = ""
-    thumbnail = fm.get("thumbnail")
+    featured_image = fm.get("featured_image")
 
     # 本文画像処理（ローカルリネーム + ハッシュベース、WordPress URL変換版コンテンツを生成）
     wp_content = process_images_with_local_rename(config, md_file, slug)
     # 全角のダブルクォート " " を ASCII の " に統一
     wp_content = wp_content.replace(""", "\"").replace(""", "\"")
 
-    # サムネイル処理（ハッシュベース + ローカルリネーム）
-    thumb_id, new_thumbnail_path = process_thumbnail_with_hash_tracking(config, md_file, slug, thumbnail)
+    # アイキャッチ画像処理（ハッシュベース + ローカルリネーム）
+    featured_image_id, new_featured_image_path = process_featured_image_with_hash_tracking(config, md_file, slug, featured_image)
 
     # wp-imagesが更新されたあとで、再度取得する
     fm = parse_frontmatter(md_file)
 
-    # サムネイルのフロントマター更新処理
-    thumbnail_updated = False
-    if new_thumbnail_path and new_thumbnail_path != thumbnail:
-        print(f"サムネイルパス更新: {thumbnail} -> {new_thumbnail_path}")
-        fm["thumbnail"] = new_thumbnail_path
-        thumbnail_updated = True
+    # アイキャッチ画像のフロントマター更新処理
+    featured_image_updated = False
+    if new_featured_image_path and new_featured_image_path != featured_image:
+        print(f"アイキャッチ画像パス更新: {featured_image} -> {new_featured_image_path}")
+        fm["featured_image"] = new_featured_image_path
+        featured_image_updated = True
 
-    # ローカルMarkdownファイル更新（サムネイルパス変更も含む）
-    if thumbnail_updated:
+    # ローカルMarkdownファイル更新（アイキャッチ画像パス変更も含む）
+    if featured_image_updated:
         write_frontmatter(md_file, fm)
-        print(f"✅ フロントマター更新完了（サムネイルパス変更）")
+        print(f"✅ フロントマター更新完了（アイキャッチ画像パス変更）")
 
     # アイキャッチ設定用のオプション作成
-    if thumb_id:
-        thumb_opt = f"--featured_image={thumb_id}"
-        print(f"アイキャッチ設定: ID {thumb_id}")
+    if featured_image_id:
+        featured_image_opt = f"--featured_image={featured_image_id}"
+        print(f"アイキャッチ設定: ID {featured_image_id}")
     else:
-        thumb_opt = ""
+        featured_image_opt = ""
         print("アイキャッチ: 設定されません")
 
     # フロントマターを除いたMarkdownコンテンツを取得
@@ -795,7 +795,7 @@ def main(md_file):
             f"mkdir -p {config.wp_path}/{config.tmp_dir} && cd {config.wp_path}/{config.tmp_dir} && "
             f"{config.wp_cli} post create {gutenberg_file} --post_type=post "
             f"--post_status={config.post_status} --post_title='{title}' --post_name='{slug}' "
-            f"--tags_input='{tags}' --post_category='{categories}' {thumb_opt} --porcelain && "
+            f"--tags_input='{tags}' --post_category='{categories}' {featured_image_opt} --porcelain && "
             f"rm {gutenberg_file}"
         )
         new_id = subprocess.check_output(ssh_cmd(config, cmd), text=True).strip()
@@ -809,12 +809,12 @@ def main(md_file):
         print(f"✅ 投稿タイトル: '{title}' で作成されました")
 
         # アイキャッチ設定（もしあれば）
-        if thumb_id:
+        if featured_image_id:
             set_thumb_cmd = (
-                f"cd {config.wp_path} && {config.wp_cli} post meta set {new_id} _thumbnail_id {thumb_id}"
+                f"cd {config.wp_path} && {config.wp_cli} post meta set {new_id} _featured_image_id {featured_image_id}"
             )
             subprocess.run(ssh_cmd(config, set_thumb_cmd), check=True)
-            print(f"✅ 新規投稿 {new_id} にアイキャッチ(ID {thumb_id}) を設定しました")
+            print(f"✅ 新規投稿 {new_id} にアイキャッチ(ID {featured_image_id}) を設定しました")
 
     else:
         # 既存投稿更新（タイトルも更新）
@@ -826,10 +826,10 @@ def main(md_file):
             f"rm {gutenberg_file}"
         )
 
-        # アイキャッチ（サムネイル）を別途設定
+        # アイキャッチ（アイキャッチ画像）を別途設定
         cmd_thumb = ""
-        if thumb_id:
-            cmd_thumb = f"{config.wp_cli} post meta set {wp_id} _thumbnail_id {thumb_id}"
+        if featured_image_id:
+            cmd_thumb = f"{config.wp_cli} post meta set {wp_id} _featured_image_id {featured_image_id}"
 
         # まとめて実行
         cmd = cmd_update
