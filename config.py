@@ -20,6 +20,7 @@ class Config:
     wp_cli: str
     tmp_dir: str
     post_status: str
+    site_url: str
     use_highlight_code_block: bool
 
 def load_config(config_file: Optional[str] = None) -> Config:
@@ -53,6 +54,7 @@ def load_config(config_file: Optional[str] = None) -> Config:
         wp_cli=os.getenv('WP_CLI', '~/bin/wp/wp-cli.phar'),
         tmp_dir=os.getenv('WP_TMP_DIR', 'tmp'),
         post_status=os.getenv('WP_POST_STATUS', 'draft'),
+        site_url=os.getenv('WP_SITE_URL'),
         use_highlight_code_block=os.getenv('WP_USE_HIGHLIGHT_CODE_BLOCK', 'True').lower() == 'true'
     )
 

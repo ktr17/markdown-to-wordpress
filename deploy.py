@@ -2,6 +2,7 @@
 """
 Markdown to WordPress Publisher
 Markdownファイルを画像付きでWordPressに投稿するメインスクリプト
+内部リンク変換機能付き
 """
 
 import subprocess, sys, yaml, os, re, shutil, hashlib, json
@@ -160,6 +161,172 @@ def resolve_image_path(md_file, img_path):
 
     print(f"   ❌ 全ての試行で画像が見つかりませんでした")
     return None
+
+def resolve_markdown_link_path(md_file, link_path):
+    """
+    Obsidianのマークダウンリンクパスを解決する
+    画像と同じロジックを使用（.md拡張子付き）
+    """
+    if link_path.startswith('http'):
+        return None  # URLはスキップ
+
+    # URLデコードを実行
+    decoded_link_path = unquote(link_path)
+    
+    # .md拡張子がなければ追加
+    if not decoded_link_path.endswith('.md'):
+        decoded_link_path += '.md'
+
+    print(f"   リンクパス解決: '{link_path}' -> '{decoded_link_path}'")
+
+    md_dir = os.path.dirname(os.path.abspath(md_file))
+    
+    # 元のパスとデコード後のパス両方で試行
+    paths_to_try = [link_path, decoded_link_path]
+    
+    for current_path in paths_to_try:
+        # .md拡張子がなければ追加
+        if not current_path.endswith('.md'):
+            current_path += '.md'
+        
+        print(f"   試行パス: {current_path}")
+
+        # 相対パス (./や../で始まる) の場合
+        if current_path.startswith('./') or current_path.startswith('../'):
+            abs_path = os.path.normpath(os.path.join(md_dir, current_path))
+            print(f"     相対パス試行: {abs_path}")
+            if os.path.exists(abs_path):
+                print(f"     ✅ 発見(相対): {abs_path}")
+                return abs_path
+
+        # 保管庫内絶対パス
+        vault_root = find_obsidian_vault_root(md_file)
+        if vault_root:
+            vault_abs_path = os.path.normpath(os.path.join(vault_root, current_path))
+            print(f"     Vault絶対パス試行: {vault_abs_path}")
+            if os.path.exists(vault_abs_path):
+                print(f"     ✅ 発見(Vault): {vault_abs_path}")
+                return vault_abs_path
+
+        # 通常の相対パスとして試行（後方互換性）
+        normal_relative = os.path.normpath(os.path.join(md_dir, current_path))
+        print(f"     通常相対パス試行: {normal_relative}")
+        if os.path.exists(normal_relative):
+            print(f"     ✅ 発見(通常): {normal_relative}")
+            return normal_relative
+
+    print(f"   ❌ 全ての試行でリンク先ファイルが見つかりませんでした")
+    return None
+
+def get_wordpress_link_data_from_md(config, md_file_path):
+    """
+    Markdownファイルからwp_id、slug、titleを読み取り、リンクデータを生成
+    """
+    try:
+        fm = parse_frontmatter(md_file_path)
+        wp_id = fm.get('wp_id')
+        slug = fm.get('slug')
+        title = fm.get('title', os.path.splitext(os.path.basename(md_file_path))[0])
+        
+        if not wp_id:
+            print(f"   ⚠️ リンク先ファイルにwp_idが設定されていません: {md_file_path}")
+            return None
+        
+        # WordPress URLを生成（設定のsite_urlを使用）
+        site_url = config.site_url.rstrip('/')
+        
+        if slug:
+            # スラッグがある場合はパーマリンク形式
+            wp_url = f"{site_url}/{slug}/"
+        else:
+            # スラッグがない場合は?p=ID形式
+            wp_url = f"{site_url}/?p={wp_id}"
+        
+        link_data = {
+            'title': title,
+            'id': wp_id,
+            'url': wp_url
+        }
+        
+        print(f"   ✅ リンクデータ生成: ID={wp_id}, タイトル={title}")
+        return link_data
+        
+    except Exception as e:
+        print(f"   ❌ リンク先ファイルの読み込みエラー: {e}")
+        return None
+
+def process_internal_links(config, md_file, text):
+    """
+    Markdown内のローカルリンクをWordPress内部リンクブロック（Gutenberg）に変換
+    [リンクテキスト](ファイル名.md) → <!-- wp:loos/post-link ... /-->
+    """
+    print("内部リンク変換処理開始...")
+
+    # Markdownリンクパターン [text](link)
+    link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+
+    # 変換されたリンクを保存（後でまとめて置換）
+    links_to_replace = []
+
+    def analyze_link(match):
+        link_text = match.group(1)
+        link_path = match.group(2)
+
+        # 外部URL、アンカーリンク、画像はスキップ
+        if link_path.startswith('http') or link_path.startswith('#') or link_path.startswith('!'):
+            return None
+
+        # .mdファイルへのリンクのみ処理
+        if not link_path.endswith('.md') and not os.path.splitext(link_path)[1] == '':
+            return None
+
+        print(f"内部リンク検出: [{link_text}]({link_path})")
+
+        # リンク先のMarkdownファイルパスを解決
+        abs_link_path = resolve_markdown_link_path(md_file, link_path)
+
+        if not abs_link_path:
+            print(f"   ⚠️ リンク先ファイルが見つからないためスキップ: {link_path}")
+            return None
+
+        # リンク先のWordPressリンクデータを取得
+        link_data = get_wordpress_link_data_from_md(config, abs_link_path)
+
+        if not link_data:
+            print(f"   ⚠️ リンクデータが取得できないためスキップ: {link_path}")
+            return None
+
+        # Gutenberg内部リンクブロックを生成
+        link_data_json = json.dumps({
+            "title": link_data['title'],
+            "id": link_data['id'],
+            "url": link_data['url'],
+            "kind": "post-type",
+            "type": "post"
+        }, ensure_ascii=False)
+
+        gutenberg_link = f'<!-- wp:loos/post-link {{"linkData":{link_data_json},"icon":"link"}} /-->'
+
+        print(f"   ✅ 変換完了: Gutenbergブロック生成")
+
+        return {
+            'original': match.group(0),
+            'replacement': gutenberg_link
+        }
+
+    # すべてのリンクを解析
+    for match in re.finditer(link_pattern, text):
+        result = analyze_link(match)
+        if result:
+            links_to_replace.append(result)
+
+    # 置換を実行
+    converted_text = text
+    for link in links_to_replace:
+        converted_text = converted_text.replace(link['original'], link['replacement'])
+
+    print(f"✅ 内部リンク変換処理完了: {len(links_to_replace)}個のリンクを変換")
+    return converted_text
 
 def rename_local_image(original_path, new_filename):
     """ローカル画像ファイルをリネーム"""
@@ -755,6 +922,10 @@ def main(md_file):
 
     # 本文画像処理（ローカルリネーム + ハッシュベース、WordPress URL変換版コンテンツを生成）
     wp_content = process_images_with_local_rename(config, md_file, slug)
+
+    # 内部リンク変換処理を追加
+    wp_content = process_internal_links(config, md_file, wp_content)
+
     # 全角のダブルクォート " " を ASCII の " に統一
     wp_content = wp_content.replace(""", "\"").replace(""", "\"")
 
