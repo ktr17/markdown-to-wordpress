@@ -2,10 +2,10 @@
 """
 Markdown to WordPress Publisher
 Markdownファイルを画像付きでWordPressに投稿するメインスクリプト
-内部リンク変換機能付き
+内部リンク変換機能付き + 脚注対応
 """
 
-import subprocess, sys, yaml, os, re, shutil, hashlib, json
+import subprocess, sys, yaml, os, re, shutil, hashlib, json, uuid
 from urllib.parse import unquote
 from typing import List, Dict, Tuple
 from config import get_config
@@ -172,7 +172,7 @@ def resolve_markdown_link_path(md_file, link_path):
 
     # URLデコードを実行
     decoded_link_path = unquote(link_path)
-    
+
     # .md拡張子がなければ追加
     if not decoded_link_path.endswith('.md'):
         decoded_link_path += '.md'
@@ -180,15 +180,15 @@ def resolve_markdown_link_path(md_file, link_path):
     print(f"   リンクパス解決: '{link_path}' -> '{decoded_link_path}'")
 
     md_dir = os.path.dirname(os.path.abspath(md_file))
-    
+
     # 元のパスとデコード後のパス両方で試行
     paths_to_try = [link_path, decoded_link_path]
-    
+
     for current_path in paths_to_try:
         # .md拡張子がなければ追加
         if not current_path.endswith('.md'):
             current_path += '.md'
-        
+
         print(f"   試行パス: {current_path}")
 
         # 相対パス (./や../で始まる) の場合
@@ -227,30 +227,25 @@ def get_wordpress_link_data_from_md(config, md_file_path):
         wp_id = fm.get('wp_id')
         slug = fm.get('slug')
         title = fm.get('title', os.path.splitext(os.path.basename(md_file_path))[0])
-        
+
         if not wp_id:
             print(f"   ⚠️ リンク先ファイルにwp_idが設定されていません: {md_file_path}")
             return None
-        
+
         # WordPress URLを生成（設定のsite_urlを使用）
         site_url = config.site_url.rstrip('/')
-        
-        if slug:
-            # スラッグがある場合はパーマリンク形式
-            wp_url = f"{site_url}/{slug}/"
-        else:
-            # スラッグがない場合は?p=ID形式
-            wp_url = f"{site_url}/?p={wp_id}"
-        
+
+        wp_url = f"{site_url}/?p={wp_id}"
+
         link_data = {
             'title': title,
             'id': wp_id,
             'url': wp_url
         }
-        
+
         print(f"   ✅ リンクデータ生成: ID={wp_id}, タイトル={title}")
         return link_data
-        
+
     except Exception as e:
         print(f"   ❌ リンク先ファイルの読み込みエラー: {e}")
         return None
@@ -379,8 +374,8 @@ def escape_html(text):
                 .replace('<', '&lt;')
                 .replace('>', '&gt;'))
 
-def process_inline_formatting(text):
-    """インライン記法を処理（太字、斜体、リンク、インラインコード）"""
+def process_inline_formatting(text, footnote_counter=None):
+    """インライン記法を処理（太字、斜体、リンク、インラインコード、脚注）"""
     # ショートコードを含む行は処理をスキップ
     if re.search(r'\[[\w\-_]+[^\]]*\]', text):
         return text
@@ -396,36 +391,117 @@ def process_inline_formatting(text):
     text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
     text = re.sub(r'_(.*?)_', r'<em>\1</em>', text)
 
-    # リンク
-    text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', text)
+    # 脚注参照（footnote_counterが提供されている場合のみ）
+    if footnote_counter is not None:
+        def replace_footnote_ref(match):
+            ref_id = match.group(1)
+            if ref_id in footnote_counter:
+                uuid_id, num = footnote_counter[ref_id]
+                return f'<sup data-fn="{uuid_id}" class="fn"><a href="#{uuid_id}" id="{uuid_id}-link">{num}</a></sup>'
+            return match.group(0)
+
+        text = re.sub(r'\[\^([^\]]+)\]', replace_footnote_ref, text)
+
+    # リンク（脚注参照の後に処理）
+    text = re.sub(r'\[([^\]^]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', text)
 
     return text
 
-def create_heading_block(content: str, level: int) -> str:
-    """見出しブロックを作成"""
-    content = process_inline_formatting(content)
-    attrs = json.dumps({"level": level})
-    return f'<!-- wp:heading {attrs} -->\n<h{level} class="wp-block-heading">{content}</h{level}>\n<!-- /wp:heading -->'
+def convert_urls_to_links(text: str) -> str:
+    """
+    テキスト内のURLを自動的にHTMLリンクに変換
+    """
+    # URLパターン (http:// または https:// で始まる)
+    url_pattern = r'(https?://[^\s]+)'
 
-def create_paragraph_block(content: str) -> str:
+    def replace_url(match):
+        url = match.group(1)
+        # URLの末尾の句読点を除外
+        punctuation = ''
+        while url and url[-1] in '.,;:!?)':
+            punctuation = url[-1] + punctuation
+            url = url[:-1]
+        return f'<a href="{url}">{url}</a>{punctuation}'
+
+    return re.sub(url_pattern, replace_url, text)
+
+def extract_footnotes(markdown_content: str) -> Tuple[str, Dict[str, str]]:
+    """
+    Markdownから脚注定義を抽出し、本文から削除
+
+    Returns:
+        (本文コンテンツ, {脚注ID: 脚注内容})
+    """
+    footnotes = {}
+    lines = markdown_content.split('\n')
+    content_lines = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # 脚注定義の検出: [^id]: 内容
+        match = re.match(r'^\[\^([^\]]+)\]:\s*(.+)$', line)
+        if match:
+            footnote_id = match.group(1)
+            footnote_text = match.group(2)
+
+            # 複数行の脚注に対応（インデントされた続きの行）
+            i += 1
+            while i < len(lines) and (lines[i].startswith('    ') or lines[i].startswith('\t')):
+                footnote_text += ' ' + lines[i].strip()
+                i += 1
+
+            footnotes[footnote_id] = footnote_text
+            continue
+
+        content_lines.append(line)
+        i += 1
+
+    return '\n'.join(content_lines), footnotes
+
+def create_footnotes_block(footnotes: Dict[str, str], footnote_order: Dict[str, Tuple[str, int]]) -> str:
+    """
+    脚注をWordPress Gutenberg標準の脚注ブロックとして生成
+
+    Args:
+        footnotes: {脚注ID: 脚注内容}
+        footnote_order: {脚注ID: (UUID, 表示番号)}
+    """
+    if not footnotes or not footnote_order:
+        return ""
+
+    # Gutenberg標準の脚注ブロック（wp:footnotesで自動生成される）
+    return '<!-- wp:footnotes /-->'
+
+def create_heading_block(content: str, level: int, footnote_counter=None) -> str:
+    """見出しブロックを作成"""
+    content = process_inline_formatting(content, footnote_counter)
+    # H2はデフォルトなので属性を省略可能
+    if level == 2:
+        return f'<!-- wp:heading -->\n<h{level} class="wp-block-heading">{content}</h{level}>\n<!-- /wp:heading -->'
+    else:
+        attrs = json.dumps({"level": level})
+        return f'<!-- wp:heading {attrs} -->\n<h{level} class="wp-block-heading">{content}</h{level}>\n<!-- /wp:heading -->'
+
+def create_paragraph_block(content: str, footnote_counter=None) -> str:
     """段落ブロックを作成"""
     if not content.strip():
         return ""
-    content = process_inline_formatting(content)
+    content = process_inline_formatting(content, footnote_counter)
     return f'<!-- wp:paragraph -->\n<p>{content}</p>\n<!-- /wp:paragraph -->'
 
 def create_image_block(url: str, alt: str = '') -> str:
     """画像ブロックを作成"""
     return f'<!-- wp:image -->\n<figure class="wp-block-image"><img src="{url}" alt="{alt}"/></figure>\n<!-- /wp:image -->'
 
-def create_list_block(items: List[str], ordered: bool = False) -> str:
+def create_list_block(items: List[str], ordered: bool = False, footnote_counter=None) -> str:
     """リストブロックを作成"""
     tag = "ol" if ordered else "ul"
     attrs = json.dumps({"ordered": ordered}) if ordered else "{}"
 
     list_html = f'<{tag}>'
     for item in items:
-        processed_item = process_inline_formatting(item)
+        processed_item = process_inline_formatting(item, footnote_counter)
         list_html += f'<li>{processed_item}</li>'
     list_html += f'</{tag}>'
 
@@ -509,7 +585,7 @@ def parse_table(lines: List[str], start_index: int) -> Tuple[List[str], int]:
 
     return table_lines, i - 1
 
-def create_table_block(table_lines: List[str]) -> str:
+def create_table_block(table_lines: List[str], footnote_counter=None) -> str:
     """テーブルブロックを作成"""
     if len(table_lines) < 2:
         return ""
@@ -533,7 +609,7 @@ def create_table_block(table_lines: List[str]) -> str:
 
     # ヘッダー
     for cell in header_cells:
-        processed_cell = process_inline_formatting(cell)
+        processed_cell = process_inline_formatting(cell, footnote_counter)
         table_html += f'<th>{processed_cell}</th>'
     table_html += '</tr></thead><tbody>'
 
@@ -542,7 +618,7 @@ def create_table_block(table_lines: List[str]) -> str:
         table_html += '<tr>'
         for i, cell in enumerate(row):
             if i < len(header_cells):  # ヘッダー数と合わせる
-                processed_cell = process_inline_formatting(cell)
+                processed_cell = process_inline_formatting(cell, footnote_counter)
                 table_html += f'<td>{processed_cell}</td>'
         table_html += '</tr>'
 
@@ -550,10 +626,11 @@ def create_table_block(table_lines: List[str]) -> str:
 
     return f'<!-- wp:table -->\n<figure class="wp-block-table">{table_html}</figure>\n<!-- /wp:table -->'
 
-def create_quote_block(content: str) -> str:
-    """引用ブロックを作成"""
-    content = process_inline_formatting(content)
-    return f'<!-- wp:quote -->\n<blockquote class="wp-block-quote"><p>{content}</p></blockquote>\n<!-- /wp:quote -->'
+def create_quote_block(content: str, footnote_counter=None) -> str:
+    """引用ブロックを作成（内部に段落ブロックを含める）"""
+    content = process_inline_formatting(content, footnote_counter)
+    # 引用ブロック内に段落ブロックを含める形式
+    return f'<!-- wp:quote -->\n<blockquote class="wp-block-quote"><!-- wp:paragraph -->\n<p>{content}</p>\n<!-- /wp:paragraph --></blockquote>\n<!-- /wp:quote -->'
 
 def parse_list_items(lines: List[str], start_index: int) -> Tuple[List[str], int, bool]:
     """リストアイテムを解析"""
@@ -606,12 +683,33 @@ def parse_code_block(lines: List[str], start_index: int) -> Tuple[str, str, int]
     code = '\n'.join(code_lines)
     return code, language, i
 
-def markdown_to_gutenberg(markdown_content: str, use_highlight_plugin: bool) -> str:
-    """MarkdownをGutenbergブロック形式に変換"""
+def markdown_to_gutenberg(markdown_content: str, use_highlight_plugin: bool) -> Tuple[str, List[Dict]]:
+    """MarkdownをGutenbergブロック形式に変換（脚注対応）
+
+    Returns:
+        (Gutenbergコンテンツ, 脚注メタデータのリスト)
+    """
     print("Markdown → Gutenberg変換開始...")
 
+    # 脚注を抽出
+    content_without_footnotes, footnotes = extract_footnotes(markdown_content)
+    print(f"脚注検出: {len(footnotes)}個")
+
+    # 脚注の出現順序を記録（UUID, 番号のタプル）
+    footnote_order = {}
+    footnote_counter_num = 1
+
+    # 本文中の脚注参照を検出して番号とUUIDを割り当て
+    for match in re.finditer(r'\[\^([^\]]+)\]', content_without_footnotes):
+        footnote_id = match.group(1)
+        if footnote_id not in footnote_order and footnote_id in footnotes:
+            # UUIDv4を生成
+            footnote_uuid = str(uuid.uuid4())
+            footnote_order[footnote_id] = (footnote_uuid, footnote_counter_num)
+            footnote_counter_num += 1
+
     blocks = []
-    lines = markdown_content.split('\n')
+    lines = content_without_footnotes.split('\n')
     i = 0
 
     while i < len(lines):
@@ -628,7 +726,7 @@ def markdown_to_gutenberg(markdown_content: str, use_highlight_plugin: bool) -> 
             level = len(stripped) - len(stripped.lstrip('#'))
             if level <= 6:  # H1-H6のみ
                 content = stripped.lstrip('#').strip()
-                blocks.append(create_heading_block(content, level))
+                blocks.append(create_heading_block(content, level, footnote_order))
                 i += 1
                 continue
 
@@ -643,14 +741,14 @@ def markdown_to_gutenberg(markdown_content: str, use_highlight_plugin: bool) -> 
         if stripped.startswith('|') and stripped.endswith('|'):
             table_lines, end_index = parse_table(lines, i)
             if len(table_lines) >= 2:  # ヘッダーとセパレーターが最低限必要
-                blocks.append(create_table_block(table_lines))
+                blocks.append(create_table_block(table_lines, footnote_order))
                 i = end_index + 1
                 continue
 
         # 引用
         if stripped.startswith('>'):
             quote_content = stripped.lstrip('>').strip()
-            blocks.append(create_quote_block(quote_content))
+            blocks.append(create_quote_block(quote_content, footnote_order))
             i += 1
             continue
 
@@ -658,7 +756,7 @@ def markdown_to_gutenberg(markdown_content: str, use_highlight_plugin: bool) -> 
         if re.match(r'^[-*+]\s', stripped) or re.match(r'^\d+\.\s', stripped):
             items, end_index, ordered = parse_list_items(lines, i)
             if items:
-                blocks.append(create_list_block(items, ordered))
+                blocks.append(create_list_block(items, ordered, footnote_order))
             i = end_index + 1
             continue
 
@@ -695,13 +793,35 @@ def markdown_to_gutenberg(markdown_content: str, use_highlight_plugin: bool) -> 
 
         if paragraph_lines:
             paragraph_content = ' '.join(paragraph_lines)
-            block = create_paragraph_block(paragraph_content)
+            block = create_paragraph_block(paragraph_content, footnote_order)
             if block:  # 空でない場合のみ追加
                 blocks.append(block)
 
+    # 脚注ブロックを最後に追加（Gutenberg標準形式）
+    footnotes_meta = []
+    if footnotes and footnote_order:
+        footnotes_block = create_footnotes_block(footnotes, footnote_order)
+        blocks.append(footnotes_block)
+
+        # post_meta用の脚注データを生成（URLを自動リンク化）
+        for footnote_id, (footnote_uuid, num) in sorted(footnote_order.items(), key=lambda x: x[1][1]):
+            if footnote_id in footnotes:
+                # 脚注内容のURLを自動的にリンクに変換
+                footnote_content = convert_urls_to_links(footnotes[footnote_id])
+
+                footnote_data = {
+                    'id': footnote_uuid,
+                    'content': footnote_content
+                }
+                footnotes_meta.append(footnote_data)
+                print(f"   脚注 [{num}]: UUID={footnote_uuid}, 内容={footnote_content[:80]}...")
+
+        print(f"✅ 脚注ブロック追加: {len(footnote_order)}個の脚注")
+        print(f"✅ 脚注メタデータ生成: {len(footnotes_meta)}個")
+
     result = '\n\n'.join(blocks)
     print(f"✅ Gutenberg変換完了: {len(blocks)}個のブロックを生成")
-    return result
+    return result, footnotes_meta
 
 def process_images_with_local_rename(config, md_file, slug):
     """
@@ -958,8 +1078,8 @@ def main(md_file):
     # フロントマターを除いたMarkdownコンテンツを取得
     content_only = re.sub(r'^---.*?---\n', '', wp_content, flags=re.DOTALL)
 
-    # MarkdownをGutenbergブロック形式に変換
-    gutenberg_content = markdown_to_gutenberg(content_only, config.use_highlight_code_block)
+    # MarkdownをGutenbergブロック形式に変換（脚注対応）
+    gutenberg_content, footnotes_meta = markdown_to_gutenberg(content_only, config.use_highlight_code_block)
 
     # 一時的なGutenbergファイル作成
     gutenberg_file = f"{base}_gutenberg.txt"
@@ -999,6 +1119,20 @@ def main(md_file):
             subprocess.run(ssh_cmd(config, set_thumb_cmd), check=True)
             print(f"✅ 新規投稿 {new_id} にアイキャッチ(ID {featured_image_id}) を設定しました")
 
+        # 脚注メタデータを保存
+        if footnotes_meta:
+            footnotes_json = json.dumps(footnotes_meta, ensure_ascii=False)
+            print(f"   保存する脚注JSON: {footnotes_json}")
+
+            # ダブルクォートをエスケープ
+            footnotes_json_escaped = footnotes_json.replace('\\', '\\\\').replace('"', '\\"')
+
+            set_footnotes_cmd = (
+                f"cd {config.wp_path} && {config.wp_cli} post meta set {new_id} footnotes \"{footnotes_json_escaped}\""
+            )
+            result = subprocess.run(ssh_cmd(config, set_footnotes_cmd), capture_output=True, text=True, check=True)
+            print(f"✅ 新規投稿 {new_id} に脚注メタデータを保存しました（{len(footnotes_meta)}個）")
+
     else:
         # 既存投稿更新（タイトルも更新）
         # 本文、タイトル、タグ・カテゴリを更新
@@ -1025,6 +1159,28 @@ def main(md_file):
 
         print(f"✅ 投稿ID {wp_id} を更新しました")
         print(f"✅ 投稿タイトル: '{title}' に更新されました")
+
+        # 脚注メタデータを更新
+        if footnotes_meta:
+            footnotes_json = json.dumps(footnotes_meta, ensure_ascii=False)
+            print(f"   更新する脚注JSON: {footnotes_json}")
+
+            # ダブルクォートをエスケープ
+            footnotes_json_escaped = footnotes_json.replace('\\', '\\\\').replace('"', '\\"')
+
+            update_footnotes_cmd = (
+                f"cd {config.wp_path} && {config.wp_cli} post meta update {wp_id} footnotes \"{footnotes_json_escaped}\""
+            )
+            result = subprocess.run(ssh_cmd(config, update_footnotes_cmd), capture_output=True, text=True, check=True)
+            print(f"✅ 投稿 {wp_id} の脚注メタデータを更新しました（{len(footnotes_meta)}個）")
+        else:
+            # 脚注がない場合はメタデータを削除
+            delete_footnotes_cmd = (
+                f"cd {config.wp_path} && {config.wp_cli} post meta delete {wp_id} footnotes"
+            )
+            # エラーを無視（メタデータが存在しない場合）
+            subprocess.run(ssh_cmd(config, delete_footnotes_cmd), check=False)
+            print(f"✅ 投稿 {wp_id} の脚注メタデータを削除しました（脚注なし）")
 
     # ローカルGutenbergファイルを削除
     os.remove(gutenberg_file)
