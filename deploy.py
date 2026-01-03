@@ -832,7 +832,7 @@ def process_images_with_local_rename(config, md_file, slug):
         text = f.read()
 
     fm = parse_frontmatter(md_file)
-    image_map = fm.get('wp_images', {})
+    image_map = fm.get('wp_images') or {}
 
     images = re.findall(r'!\[([^\]]*)\]\(([^)]*)\)', text)  # alt text も取得
     wp_text = text
@@ -927,7 +927,7 @@ def process_featured_image_with_hash_tracking(config, md_file, slug, featured_im
     print(f"アイキャッチ画像処理開始: {featured_image_path}")
 
     fm = parse_frontmatter(md_file)
-    image_map = fm.get('wp_images', {})
+    image_map = fm.get('wp_images') or {}
 
     decoded_path = unquote(featured_image_path)
     abs_thumb = resolve_image_path(md_file, decoded_path)
